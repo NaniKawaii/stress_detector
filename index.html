@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detector de Señales de Estrés</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+        }
+
+        .video-section {
+            position: relative;
+            background: #0f3460;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+
+        #cam {
+            width: 100%;
+            display: block;
+            transform: scaleX(-1);
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            transform: scaleX(-1);
+        }
+
+        .stats-panel {
+            background: #16213e;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .stat-item {
+            background: #0f3460;
+            padding: 12px;
+            border-radius: 6px;
+            border-left: 4px solid #e94560;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #00ff88;
+            margin-top: 4px;
+        }
+
+        .buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: #e94560;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #ff6b7a;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(233, 69, 96, 0.4);
+        }
+
+        .btn-primary:disabled {
+            background: #666;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: #0f3460;
+            color: #00ff88;
+            border: 2px solid #00ff88;
+        }
+
+        .btn-secondary:hover:not(:disabled) {
+            background: #00ff88;
+            color: #16213e;
+            transform: translateY(-2px);
+        }
+
+        .timer {
+            text-align: center;
+            font-size: 32px;
+            font-weight: bold;
+            color: #00ff88;
+            display: none;
+        }
+
+        .disclaimer {
+            font-size: 11px;
+            color: #888;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+            line-height: 1.4;
+        }
+
+        .status {
+            font-size: 12px;
+            padding: 8px;
+            border-radius: 4px;
+            background: #0f3460;
+            color: #00ff88;
+            text-align: center;
+        }
+
+        h2 {
+            font-size: 14px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="video-section">
+            <video id="cam" autoplay playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+
+        <div class="stats-panel">
+            <h2>Análisis en tiempo real</h2>
+
+            <div class="status" id="status">Iniciando cámara...</div>
+
+            <div class="stat-item">
+                <div class="stat-label">Edad Estimada</div>
+                <div class="stat-value" id="age">--</div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-label">Emoción</div>
+                <div class="stat-value" id="emotion">--</div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-label">Nivel de Atención</div>
+                <div class="stat-value" id="attention">--%</div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-label">Fatiga</div>
+                <div class="stat-value" id="fatigue">--</div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-label">Personalidad (Big Five)</div>
+                <div class="stat-value" id="personality" style="font-size: 12px;">--</div>
+            </div>
+
+            <div class="stat-item">
+                <div class="stat-label">Indicador de Posible Engaño</div>
+                <div class="stat-value" id="deception">--%</div>
+            </div>
+
+            <div class="timer" id="timer">7</div>
+
+            <div class="buttons">
+                <button class="btn-primary" id="calibrate-btn">Calibrar Baseline</button>
+                <button class="btn-primary" id="question-btn">Hacer Pregunta (7s)</button>
+            </div>
+
+            <div class="disclaimer">
+                ⚠️ <strong>Descargo de responsabilidad:</strong> Este sistema NO detecta mentiras con certeza. Solo estima señales asociadas a estrés e incongruencia. Propósito experimental/educativo.
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
