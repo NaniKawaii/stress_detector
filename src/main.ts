@@ -33,6 +33,7 @@ interface RuntimeState {
     earHistory: number[];
     blinkRateHistory: number[];
     yawnCount: number;
+    baselineAgeSamples: number[];
 }
 
 const runtimeState: RuntimeState = {
@@ -48,6 +49,7 @@ const runtimeState: RuntimeState = {
     earHistory: [],
     blinkRateHistory: [],
     yawnCount: 0,
+    baselineAgeSamples: [],
     currentAnalysis: {
         emotion: { label: 'Neutral', score: 0.75 },
         age: { age: 28, confidence: 0.8 },
@@ -141,18 +143,18 @@ function combineEmotionSignals(faceEmotion: EmotionResult | null, modelEmotion: 
     if (!faceEmotion) {
         return {
             label: normalizeEmotionLabel(modelEmotion.label),
-            score: clamp(modelEmotion.score, 0.55, 0.99)
+            score: clamp(modelEmotion.score, 0.35, 0.95)
         };
     }
 
     const face = {
         label: normalizeEmotionLabel(faceEmotion.label),
-        score: clamp(faceEmotion.score, 0.5, 0.99)
+        score: clamp(faceEmotion.score, 0.35, 0.95)
     };
 
     const local = {
         label: normalizeEmotionLabel(modelEmotion.label),
-        score: clamp(modelEmotion.score, 0.5, 0.99)
+        score: clamp(modelEmotion.score, 0.35, 0.95)
     };
 
     let faceWeight = 0.58;
@@ -166,7 +168,7 @@ function combineEmotionSignals(faceEmotion: EmotionResult | null, modelEmotion: 
     if (face.label === local.label) {
         return {
             label: face.label,
-            score: clamp(face.score * faceWeight + local.score * localWeight + 0.05, 0.55, 0.99)
+            score: clamp(face.score * faceWeight + local.score * localWeight + 0.03, 0.4, 0.95)
         };
     }
 
@@ -175,14 +177,14 @@ function combineEmotionSignals(faceEmotion: EmotionResult | null, modelEmotion: 
 
     if (Math.abs(faceStrength - localStrength) < 0.08) {
         if (face.label === 'Neutral' && local.label !== 'Neutral') {
-            return { label: local.label, score: clamp(local.score, 0.55, 0.98) };
+            return { label: local.label, score: clamp(local.score, 0.4, 0.95) };
         }
-        return { label: face.label, score: clamp(face.score, 0.55, 0.98) };
+        return { label: face.label, score: clamp(face.score, 0.4, 0.95) };
     }
 
     return faceStrength > localStrength
-        ? { label: face.label, score: clamp(face.score, 0.55, 0.98) }
-        : { label: local.label, score: clamp(local.score, 0.55, 0.98) };
+        ? { label: face.label, score: clamp(face.score, 0.4, 0.95) }
+        : { label: local.label, score: clamp(local.score, 0.4, 0.95) };
 }
 
 function sampleFrame(frame: ImageData): number[] {
@@ -226,7 +228,7 @@ function computeMetrics(frame: ImageData): FrameMetrics {
 }
 
 function updateStableEmotion(rawLabel: EmotionLabel, rawScore: number): { label: EmotionLabel; score: number } {
-    const decayFactor = 0.92;
+    const decayFactor = 0.86;
 
     Object.keys(runtimeState.emotionScores).forEach((label) => {
         runtimeState.emotionScores[label] *= decayFactor;
@@ -246,8 +248,50 @@ function updateStableEmotion(rawLabel: EmotionLabel, rawScore: number): { label:
         }
     });
 
-    const normalizedScore = total > 0 ? clamp(bestScore / total + 0.4, 0.55, 0.98) : 0.75;
+    const normalizedScore = total > 0 ? clamp(bestScore / total + 0.25, 0.35, 0.92) : 0.65;
     return { label: bestLabel, score: normalizedScore };
+}
+
+function estimateAge(faceAnalysis: FaceAnalysis | null): { age: number; confidence: number } {
+    if (!faceAnalysis) {
+        return { age: runtimeState.stableAge, confidence: 0.7 };
+    }
+
+    const blend = faceAnalysis.blendshapes || [];
+    const getBlend = (name: string): number => blend.find((item) => item.categoryName === name)?.score || 0;
+
+    const brow = (getBlend('browInnerUp') + getBlend('browOuterUpLeft') + getBlend('browOuterUpRight')) / 3;
+    const smile = (getBlend('mouthSmileLeft') + getBlend('mouthSmileRight')) / 2;
+    const frown = (getBlend('mouthFrownLeft') + getBlend('mouthFrownRight')) / 2;
+    const eyeSquint = (getBlend('eyeSquintLeft') + getBlend('eyeSquintRight')) / 2;
+
+    const normalizedEar = clamp((faceAnalysis.eyeAspectRatio - 0.2) / 0.16, 0, 1);
+
+    const ageOffset =
+        (1 - normalizedEar) * 6 +
+        eyeSquint * 5 +
+        frown * 3 -
+        smile * 4 -
+        brow * 3;
+
+    const instantaneousAge = clamp(Math.round(22 + ageOffset), 18, 40);
+
+    pushLimited(runtimeState.baselineAgeSamples, instantaneousAge, 45);
+
+    const sorted = [...runtimeState.baselineAgeSamples].sort((a, b) => a - b);
+    const median = sorted.length
+        ? sorted[Math.floor(sorted.length / 2)]
+        : instantaneousAge;
+
+    runtimeState.stableAge = Math.round(applyEMA(median, runtimeState.stableAge, 0.12));
+
+    const volatility = sorted.length > 4
+        ? sorted[sorted.length - 1] - sorted[0]
+        : 0;
+
+    const confidence = clamp(0.9 - volatility / 60, 0.62, 0.92);
+
+    return { age: runtimeState.stableAge, confidence };
 }
 
 function estimateAttention(
@@ -309,22 +353,27 @@ function estimateFatigue(
         pushLimited(runtimeState.blinkRateHistory, blinkRate, 60);
     }
 
-    const avgEAR = average(runtimeState.earHistory);
-    const earClosed = ear < 0.18 ? 1 : 0;
-    const normalizedBlinkRate = Math.min(blinkRate / 35, 1);
+    const earMin = Math.min(...runtimeState.earHistory);
+    const normalizedBlinkRate = clamp(blinkRate / 28, 0, 1);
+    const lowBlinkPenalty = blinkRate > 0 && blinkRate < 8 ? (8 - blinkRate) / 8 : 0;
+    const prolongedClosure = clamp((0.2 - ear) / 0.07, 0, 1);
+    const microSleepRisk = clamp((0.17 - earMin) / 0.05, 0, 1);
     const yawnBonus = isYawning ? 1 : 0;
 
     if (isYawning) {
         runtimeState.yawnCount++;
     }
 
-    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.18).length / Math.max(runtimeState.earHistory.length, 1);
+    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.2).length / Math.max(runtimeState.earHistory.length, 1);
 
     const fatigueScore = clamp(
-        earClosedPercent * 45 +
-        normalizedBlinkRate * 30 +
-        yawnBonus * 15 +
-        (emotion.label === 'Triste' ? emotion.score * 10 : 0),
+        earClosedPercent * 35 +
+        prolongedClosure * 22 +
+        normalizedBlinkRate * 18 +
+        lowBlinkPenalty * 12 +
+        microSleepRisk * 8 +
+        yawnBonus * 12 +
+        (emotion.label === 'Triste' ? emotion.score * 8 : 0),
         0,
         100
     );
@@ -391,15 +440,14 @@ function calculateDeceptionEstimate(): number {
 }
 
 async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<AnalysisFrame> {
-    const metrics = computeMetrics(frame);
-
     if (!runtimeState.initialized) {
-        runtimeState.stableAge = clamp(Math.round(22 + (metrics.luminance + metrics.contrast) % 20), 18, 48);
+        runtimeState.stableAge = 24;
         runtimeState.currentAnalysis.age.age = runtimeState.stableAge;
         runtimeState.initialized = true;
     }
 
     const faceAnalysis = await analyzeFaceFromVideo(video);
+    const ageEstimate = estimateAge(faceAnalysis);
     const modelEmotion = await detectEmotion(frame);
     const fusedEmotion = combineEmotionSignals(faceAnalysis?.emotion ?? null, modelEmotion);
     const stableEmotion = updateStableEmotion(fusedEmotion.label, fusedEmotion.score);
@@ -422,7 +470,7 @@ async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<
 
     runtimeState.currentAnalysis = {
         emotion: stableEmotion,
-        age: { age: runtimeState.stableAge, confidence: 0.82 },
+        age: ageEstimate,
         attention: {
             level: Math.round(average(runtimeState.attentionHistory) || attentionLevel),
             gazingAway: attentionLevel < 55
@@ -482,6 +530,7 @@ async function init(): Promise<void> {
             runtimeState.fatigueHistory = [];
             runtimeState.emotionHistory = [];
             runtimeState.emotionScores = {};
+            runtimeState.baselineAgeSamples = [];
 
             setTimeout(() => {
                 ui.status.textContent = '✓ Baseline calibrado';
