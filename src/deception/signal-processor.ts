@@ -31,7 +31,11 @@ export class SignalProcessor {
             stressLevel += 20;
         }
 
-        const incongruence = this.age && this.attentionLevel && this.age < 30 && this.attentionLevel < 3;
+        const incongruence =
+            this.age !== null &&
+            this.attentionLevel !== null &&
+            this.age < 30 &&
+            this.attentionLevel < 3;
 
         return { stressLevel, incongruence };
     }

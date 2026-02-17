@@ -3,7 +3,7 @@ export class PersonalityAnalyzer {
         // Initialize any necessary variables or models here
     }
 
-    analyzePersonality(responses: Record<string, any>): Record<string, number> {
+    analyzePersonality(responses: Record<string, unknown>): Record<string, number> {
         const personalityTraits = {
             openness: 0,
             conscientiousness: 0,
@@ -12,23 +12,27 @@ export class PersonalityAnalyzer {
             neuroticism: 0
         };
 
+        type TraitKey = keyof typeof personalityTraits;
+
         // Example analysis logic based on user responses
         for (const [question, answer] of Object.entries(responses)) {
+            const answerValue = Boolean(answer);
+
             switch (question) {
                 case 'Q1':
-                    personalityTraits.openness += answer ? 1 : 0;
+                    personalityTraits.openness += answerValue ? 1 : 0;
                     break;
                 case 'Q2':
-                    personalityTraits.conscientiousness += answer ? 1 : 0;
+                    personalityTraits.conscientiousness += answerValue ? 1 : 0;
                     break;
                 case 'Q3':
-                    personalityTraits.extraversion += answer ? 1 : 0;
+                    personalityTraits.extraversion += answerValue ? 1 : 0;
                     break;
                 case 'Q4':
-                    personalityTraits.agreeableness += answer ? 1 : 0;
+                    personalityTraits.agreeableness += answerValue ? 1 : 0;
                     break;
                 case 'Q5':
-                    personalityTraits.neuroticism += answer ? 1 : 0;
+                    personalityTraits.neuroticism += answerValue ? 1 : 0;
                     break;
                 default:
                     break;
@@ -36,7 +40,8 @@ export class PersonalityAnalyzer {
         }
 
         // Normalize the traits to a scale of 0-1
-        for (const trait in personalityTraits) {
+        const traits: TraitKey[] = ['openness', 'conscientiousness', 'extraversion', 'agreeableness', 'neuroticism'];
+        for (const trait of traits) {
             personalityTraits[trait] = personalityTraits[trait] / 5; // Assuming 5 questions
         }
 

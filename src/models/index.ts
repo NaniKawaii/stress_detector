@@ -1,2 +1,1 @@
-export * from './emotion-model';
-export * from './age-model';
+export const emotionModelPath = new URL('./emotion/model.json', import.meta.url).toString();

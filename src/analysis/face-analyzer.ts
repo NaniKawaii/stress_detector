@@ -6,6 +6,19 @@ type EmotionLabel = 'Neutral' | 'Feliz' | 'Triste' | 'Enojado' | 'Sorprendido' |
 interface FaceAnalysisResult {
     emotion: EmotionResult;
     attention: AttentionResult;
+    headPose: { yaw: number; pitch: number; roll: number };
+    eyeMetrics: { 
+        blink: number;
+        eyeLook: number;
+        jawOpen: number;
+        eyeLookOut: number;
+        eyeLookUp: number;
+        eyeLookDown: number;
+    };
+    eyeAspectRatio: number;
+    mouthAspectRatio: number;
+    faceLandmarks: Array<[number, number, number]> | null;
+    blendshapes: Array<{ categoryName: string; score: number }> | null;
 }
 
 interface CachedResult {
@@ -36,22 +49,145 @@ function scoreMap(categories: Array<{ categoryName: string; score: number }> | u
     return map;
 }
 
-function matrixToPose(matrixData: number[] | undefined): { yaw: number; pitch: number } {
+function matrixToPose(matrixData: number[] | undefined): { yaw: number; pitch: number; roll: number } {
     if (!matrixData || matrixData.length < 16) {
-        return { yaw: 0, pitch: 0 };
+        return { yaw: 0, pitch: 0, roll: 0 };
     }
 
     const r20 = matrixData[8];
     const r21 = matrixData[9];
     const r22 = matrixData[10];
+    const r01 = matrixData[1];
+    const r11 = matrixData[5];
 
     const yaw = Math.atan2(r20, r22) * (180 / Math.PI);
     const pitch = Math.asin(clamp(-r21, -1, 1)) * (180 / Math.PI);
+    const roll = Math.atan2(r01, r11) * (180 / Math.PI);
 
     return {
         yaw: clamp(yaw, -45, 45),
-        pitch: clamp(pitch, -35, 35)
+        pitch: clamp(pitch, -35, 35),
+        roll: clamp(roll, -35, 35)
     };
+}
+
+function extractEyeMetrics(blend: Record<string, number>): { 
+    blink: number;
+    eyeLook: number;
+    jawOpen: number;
+    eyeLookOut: number;
+    eyeLookUp: number;
+    eyeLookDown: number;
+} {
+    const eyeLookInLeft = blend.eyeLookInLeft || 0;
+    const eyeLookOutLeft = blend.eyeLookOutLeft || 0;
+    const eyeLookInRight = blend.eyeLookInRight || 0;
+    const eyeLookOutRight = blend.eyeLookOutRight || 0;
+    const eyeLookUpLeft = blend.eyeLookUpLeft || 0;
+    const eyeLookUpRight = blend.eyeLookUpRight || 0;
+    const eyeLookDownLeft = blend.eyeLookDownLeft || 0;
+    const eyeLookDownRight = blend.eyeLookDownRight || 0;
+    
+    const eyeLookOut = Math.max(eyeLookOutLeft, eyeLookOutRight);
+    const eyeLookUp = Math.max(eyeLookUpLeft, eyeLookUpRight);
+    const eyeLookDown = Math.max(eyeLookDownLeft, eyeLookDownRight);
+    
+    const eyeLook =
+        eyeLookInLeft +
+        eyeLookOutLeft +
+        eyeLookInRight +
+        eyeLookOutRight +
+        eyeLookUpLeft +
+        eyeLookUpRight +
+        eyeLookDownLeft +
+        eyeLookDownRight;
+
+    const blink = (blend.eyeBlinkLeft || 0) + (blend.eyeBlinkRight || 0);
+    const jawOpen = blend.jawOpen || 0;
+
+    return {
+        blink,
+        eyeLook,
+        jawOpen,
+        eyeLookOut,
+        eyeLookUp,
+        eyeLookDown
+    };
+}
+
+function euclideanDistance(p1: [number, number], p2: [number, number]): number {
+    const dx = p1[0] - p2[0];
+    const dy = p1[1] - p2[1];
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+function calculateEAR(landmarks: Array<[number, number, number]>): number {
+    const EYE_LEFT_TOP = 159;
+    const EYE_LEFT_BOTTOM = 145;
+    const EYE_LEFT_INNER = 133;
+    const EYE_LEFT_OUTER = 33;
+    const EYE_LEFT_UP1 = 158;
+    const EYE_LEFT_DOWN1 = 163;
+
+    const EYE_RIGHT_TOP = 386;
+    const EYE_RIGHT_BOTTOM = 374;
+    const EYE_RIGHT_INNER = 362;
+    const EYE_RIGHT_OUTER = 263;
+    const EYE_RIGHT_UP1 = 385;
+    const EYE_RIGHT_DOWN1 = 390;
+
+    if (!landmarks[EYE_LEFT_TOP] || !landmarks[EYE_RIGHT_TOP]) {
+        return 0.3;
+    }
+
+    const leftDistance1 = euclideanDistance(
+        [landmarks[EYE_LEFT_UP1][0], landmarks[EYE_LEFT_UP1][1]],
+        [landmarks[EYE_LEFT_DOWN1][0], landmarks[EYE_LEFT_DOWN1][1]]
+    );
+
+    const leftDistance2 = euclideanDistance(
+        [landmarks[EYE_LEFT_INNER][0], landmarks[EYE_LEFT_INNER][1]],
+        [landmarks[EYE_LEFT_OUTER][0], landmarks[EYE_LEFT_OUTER][1]]
+    );
+
+    const leftEAR = (leftDistance1 + leftDistance1) / (2 * leftDistance2 + 0.001);
+
+    const rightDistance1 = euclideanDistance(
+        [landmarks[EYE_RIGHT_UP1][0], landmarks[EYE_RIGHT_UP1][1]],
+        [landmarks[EYE_RIGHT_DOWN1][0], landmarks[EYE_RIGHT_DOWN1][1]]
+    );
+
+    const rightDistance2 = euclideanDistance(
+        [landmarks[EYE_RIGHT_INNER][0], landmarks[EYE_RIGHT_INNER][1]],
+        [landmarks[EYE_RIGHT_OUTER][0], landmarks[EYE_RIGHT_OUTER][1]]
+    );
+
+    const rightEAR = (rightDistance1 + rightDistance1) / (2 * rightDistance2 + 0.001);
+
+    return (leftEAR + rightEAR) / 2;
+}
+
+function calculateMAR(landmarks: Array<[number, number, number]>): number {
+    const MOUTH_TOP = 13;
+    const MOUTH_BOTTOM = 14;
+    const MOUTH_LEFT = 78;
+    const MOUTH_RIGHT = 308;
+
+    if (!landmarks[MOUTH_TOP] || !landmarks[MOUTH_BOTTOM]) {
+        return 0;
+    }
+
+    const verticalDistance = euclideanDistance(
+        [landmarks[MOUTH_TOP][0], landmarks[MOUTH_TOP][1]],
+        [landmarks[MOUTH_BOTTOM][0], landmarks[MOUTH_BOTTOM][1]]
+    );
+
+    const horizontalDistance = euclideanDistance(
+        [landmarks[MOUTH_LEFT][0], landmarks[MOUTH_LEFT][1]],
+        [landmarks[MOUTH_RIGHT][0], landmarks[MOUTH_RIGHT][1]]
+    );
+
+    return verticalDistance / (horizontalDistance + 0.001);
 }
 
 function inferEmotion(blend: Record<string, number>): EmotionResult {
@@ -82,18 +218,7 @@ function inferEmotion(blend: Record<string, number>): EmotionResult {
     return { label, score };
 }
 
-function inferAttention(blend: Record<string, number>, yaw: number, pitch: number): AttentionResult {
-    const eyeLook =
-        (blend.eyeLookInLeft || 0) +
-        (blend.eyeLookOutLeft || 0) +
-        (blend.eyeLookInRight || 0) +
-        (blend.eyeLookOutRight || 0) +
-        (blend.eyeLookUpLeft || 0) +
-        (blend.eyeLookUpRight || 0) +
-        (blend.eyeLookDownLeft || 0) +
-        (blend.eyeLookDownRight || 0);
-
-    const blink = (blend.eyeBlinkLeft || 0) + (blend.eyeBlinkRight || 0);
+function inferAttention(eyeLook: number, blink: number, yaw: number, pitch: number): AttentionResult {
 
     const gazePenalty = clamp(eyeLook * 36, 0, 45);
     const headPenalty = clamp(Math.abs(yaw) * 0.8 + Math.abs(pitch) * 0.65, 0, 42);
@@ -172,10 +297,21 @@ export async function analyzeFaceFromVideo(video: HTMLVideoElement): Promise<Fac
     const blend = scoreMap(detections.faceBlendshapes[0]?.categories as Array<{ categoryName: string; score: number }>);
     const matrix = detections.facialTransformationMatrixes?.[0]?.data as number[] | undefined;
     const pose = matrixToPose(matrix);
+    const eyeMetrics = extractEyeMetrics(blend);
+
+    const landmarks = detections.faceLandmarks?.[0]?.map((lm) => [lm.x, lm.y, lm.z] as [number, number, number]) || null;
+    const eyeAspectRatio = landmarks ? calculateEAR(landmarks) : 0.3;
+    const mouthAspectRatio = landmarks ? calculateMAR(landmarks) : 0;
 
     const result: FaceAnalysisResult = {
         emotion: inferEmotion(blend),
-        attention: inferAttention(blend, pose.yaw, pose.pitch)
+        attention: inferAttention(eyeMetrics.eyeLook, eyeMetrics.blink, pose.yaw, pose.pitch),
+        headPose: pose,
+        eyeMetrics,
+        eyeAspectRatio,
+        mouthAspectRatio,
+        faceLandmarks: landmarks,
+        blendshapes: detections.faceBlendshapes?.[0]?.categories as Array<{ categoryName: string; score: number }> || null
     };
 
     cached = { timestamp: now, result };

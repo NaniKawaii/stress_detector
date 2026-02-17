@@ -2,7 +2,8 @@ import { startWebcam } from './webcam/stream';
 import { getFrame } from './webcam/capture';
 import { detectEmotion } from './analysis/emotion-detector';
 import { analyzeFaceFromVideo } from './analysis/face-analyzer';
-import { AnalysisFrame } from './types/index';
+import { blinkDetector } from './analysis/blink-detector';
+import { AnalysisFrame, EmotionResult } from './types/index';
 
 let stream: MediaStream | null = null;
 let isRunning = false;
@@ -10,6 +11,7 @@ let isRunning = false;
 const DISPLAY_UPDATE_MS = 1200;
 
 type EmotionLabel = 'Neutral' | 'Feliz' | 'Triste' | 'Enojado' | 'Sorprendido' | 'Asustado' | 'Disgustado';
+type FaceAnalysis = NonNullable<Awaited<ReturnType<typeof analyzeFaceFromVideo>>>;
 
 interface FrameMetrics {
     luminance: number;
@@ -27,6 +29,10 @@ interface RuntimeState {
     fatigueHistory: number[];
     emotionHistory: EmotionLabel[];
     currentAnalysis: AnalysisFrame;
+    smoothedAttention: number;
+    earHistory: number[];
+    blinkRateHistory: number[];
+    yawnCount: number;
 }
 
 const runtimeState: RuntimeState = {
@@ -38,6 +44,10 @@ const runtimeState: RuntimeState = {
     attentionHistory: [],
     fatigueHistory: [],
     emotionHistory: [],
+    smoothedAttention: 75,
+    earHistory: [],
+    blinkRateHistory: [],
+    yawnCount: 0,
     currentAnalysis: {
         emotion: { label: 'Neutral', score: 0.75 },
         age: { age: 28, confidence: 0.8 },
@@ -91,6 +101,10 @@ function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
 }
 
+function applyEMA(newValue: number, previousValue: number, alpha: number = 0.2): number {
+    return alpha * newValue + (1 - alpha) * previousValue;
+}
+
 function pushLimited(values: number[], value: number, maxSize: number = 30): void {
     values.push(value);
     if (values.length > maxSize) {
@@ -109,6 +123,66 @@ function average(values: number[]): number {
     if (values.length === 0) return 0;
     const sum = values.reduce((acc, value) => acc + value, 0);
     return sum / values.length;
+}
+
+function normalizeEmotionLabel(label: string): EmotionLabel {
+    const normalized = label.trim().toLowerCase();
+
+    if (normalized === 'feliz' || normalized === 'happy') return 'Feliz';
+    if (normalized === 'triste' || normalized === 'sad') return 'Triste';
+    if (normalized === 'enojado' || normalized === 'angry') return 'Enojado';
+    if (normalized === 'sorprendido' || normalized === 'surprised') return 'Sorprendido';
+    if (normalized === 'asustado' || normalized === 'fear' || normalized === 'fearful') return 'Asustado';
+    if (normalized === 'disgustado' || normalized === 'disgust') return 'Disgustado';
+    return 'Neutral';
+}
+
+function combineEmotionSignals(faceEmotion: EmotionResult | null, modelEmotion: EmotionResult): { label: EmotionLabel; score: number } {
+    if (!faceEmotion) {
+        return {
+            label: normalizeEmotionLabel(modelEmotion.label),
+            score: clamp(modelEmotion.score, 0.55, 0.99)
+        };
+    }
+
+    const face = {
+        label: normalizeEmotionLabel(faceEmotion.label),
+        score: clamp(faceEmotion.score, 0.5, 0.99)
+    };
+
+    const local = {
+        label: normalizeEmotionLabel(modelEmotion.label),
+        score: clamp(modelEmotion.score, 0.5, 0.99)
+    };
+
+    let faceWeight = 0.58;
+    let localWeight = 0.42;
+
+    if (local.score > face.score + 0.12) {
+        faceWeight = 0.45;
+        localWeight = 0.55;
+    }
+
+    if (face.label === local.label) {
+        return {
+            label: face.label,
+            score: clamp(face.score * faceWeight + local.score * localWeight + 0.05, 0.55, 0.99)
+        };
+    }
+
+    const faceStrength = face.score * faceWeight;
+    const localStrength = local.score * localWeight;
+
+    if (Math.abs(faceStrength - localStrength) < 0.08) {
+        if (face.label === 'Neutral' && local.label !== 'Neutral') {
+            return { label: local.label, score: clamp(local.score, 0.55, 0.98) };
+        }
+        return { label: face.label, score: clamp(face.score, 0.55, 0.98) };
+    }
+
+    return faceStrength > localStrength
+        ? { label: face.label, score: clamp(face.score, 0.55, 0.98) }
+        : { label: local.label, score: clamp(local.score, 0.55, 0.98) };
 }
 
 function sampleFrame(frame: ImageData): number[] {
@@ -176,33 +250,93 @@ function updateStableEmotion(rawLabel: EmotionLabel, rawScore: number): { label:
     return { label: bestLabel, score: normalizedScore };
 }
 
-function estimateAttention(metrics: FrameMetrics): number {
-    const motionPenalty = clamp(Math.abs(metrics.motion - 10) * 2.5, 0, 35);
-    const brightnessPenalty = clamp(Math.abs(metrics.luminance - 125) / 4, 0, 20);
-    const contrastPenalty = clamp(Math.abs(metrics.contrast - 52) / 3, 0, 15);
+function estimateAttention(
+    faceAnalysis: FaceAnalysis | null,
+    emotion: { label: EmotionLabel; score: number }
+): number {
+    if (!faceAnalysis) {
+        // Fallback if no face detected
+        const emotionPenalty = (emotion.label === 'Asustado' || emotion.label === 'Enojado')
+            ? clamp(emotion.score * 10, 0, 10)
+            : emotion.label === 'Triste'
+                ? clamp(emotion.score * 7, 0, 7)
+                : 0;
+        return clamp(75 - emotionPenalty, 20, 99);
+    }
 
-    return clamp(Math.round(100 - motionPenalty - brightnessPenalty - contrastPenalty), 20, 99);
+    // Extract eye gaze from individual eye look metrics
+    const gazeAway = Math.max(
+        faceAnalysis.eyeMetrics.eyeLookOut,
+        faceAnalysis.eyeMetrics.eyeLookUp,
+        faceAnalysis.eyeMetrics.eyeLookDown
+    );
+    
+    // Extract head pose: yaw and pitch from transformation
+    const headYaw = Math.abs(faceAnalysis.headPose.yaw || 0) / 45; // Normalize to 0-1 (45° max)
+    const headPitch = Math.abs(faceAnalysis.headPose.pitch || 0) / 45;
+    const headAway = Math.max(Math.min(headYaw, 1), Math.min(headPitch, 1));
+    
+    // Apply attention formula: 100 * (1 - clamp(0.6*gaze_away + 0.4*head_away, 0, 1))
+    const attentionRaw = 100 * (1 - clamp(0.6 * gazeAway + 0.4 * headAway, 0, 1));
+    
+    // Apply EMA smoothing
+    runtimeState.smoothedAttention = applyEMA(attentionRaw, runtimeState.smoothedAttention, 0.15);
+    
+    return clamp(Math.round(runtimeState.smoothedAttention), 20, 99);
 }
 
-function estimateFatigue(metrics: FrameMetrics, attention: number): { score: number; level: string; blinkRate: number; eyeAspectRatio: number } {
+function estimateFatigue(
+    faceAnalysis: FaceAnalysis | null,
+    blinkInfo: { blinks: number; isBlinking: boolean; isYawning: boolean } | null,
+    emotion: { label: EmotionLabel; score: number }
+): { score: number; level: string; blinkRate: number; eyeAspectRatio: number } {
+    if (!faceAnalysis) {
+        return {
+            score: 35,
+            level: 'Baja',
+            blinkRate: 14,
+            eyeAspectRatio: 0.34
+        };
+    }
+
+    const ear = faceAnalysis.eyeAspectRatio;
+    const mar = faceAnalysis.mouthAspectRatio;
+    const blinkRate = blinkInfo?.blinks || 0;
+    const isYawning = blinkInfo?.isYawning || false;
+
+    pushLimited(runtimeState.earHistory, ear, 60);
+    if (blinkRate > 0) {
+        pushLimited(runtimeState.blinkRateHistory, blinkRate, 60);
+    }
+
+    const avgEAR = average(runtimeState.earHistory);
+    const earClosed = ear < 0.18 ? 1 : 0;
+    const normalizedBlinkRate = Math.min(blinkRate / 35, 1);
+    const yawnBonus = isYawning ? 1 : 0;
+
+    if (isYawning) {
+        runtimeState.yawnCount++;
+    }
+
+    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.18).length / Math.max(runtimeState.earHistory.length, 1);
+
     const fatigueScore = clamp(
-        (30 - metrics.motion) * 1.8 +
-        (95 - metrics.contrast) * 0.35 +
-        (80 - metrics.luminance) * 0.25 +
-        (65 - attention) * 0.75,
+        earClosedPercent * 45 +
+        normalizedBlinkRate * 30 +
+        yawnBonus * 15 +
+        (emotion.label === 'Triste' ? emotion.score * 10 : 0),
         0,
         100
     );
 
-    const level = fatigueScore >= 68 ? 'Alta' : fatigueScore >= 45 ? 'Media' : 'Baja';
-    const blinkRate = clamp(Math.round(24 - metrics.motion / 1.8), 6, 28);
-    const eyeAspectRatio = clamp(0.18 + metrics.contrast / 430, 0.18, 0.38);
+    const level =
+        fatigueScore >= 67 ? 'Alta' : fatigueScore >= 34 ? 'Media' : 'Baja';
 
     return {
         score: fatigueScore,
         level,
-        blinkRate,
-        eyeAspectRatio
+        blinkRate: Math.round(blinkRate),
+        eyeAspectRatio: Number(ear.toFixed(2))
     };
 }
 
@@ -225,6 +359,37 @@ function buildPersonalitySummary(): string {
     return `O:${openness} C:${conscientiousness} E:${extraversion} A:${agreeableness} N:${neuroticism}`;
 }
 
+function calculateDeceptionEstimate(): number {
+    const attentionAvg = average(runtimeState.attentionHistory);
+    const fatigueAvg = average(runtimeState.fatigueHistory);
+    const recentEmotions = runtimeState.emotionHistory.slice(-20);
+
+    const negativeRatio = recentEmotions.length
+        ? recentEmotions.filter((emotion) => emotion === 'Enojado' || emotion === 'Asustado' || emotion === 'Triste').length / recentEmotions.length
+        : 0;
+
+    let transitions = 0;
+    for (let index = 1; index < recentEmotions.length; index++) {
+        if (recentEmotions[index] !== recentEmotions[index - 1]) {
+            transitions++;
+        }
+    }
+
+    const volatility = recentEmotions.length > 1 ? transitions / (recentEmotions.length - 1) : 0;
+
+    return clamp(
+        Math.round(
+            20 +
+            (100 - attentionAvg) * 0.24 +
+            fatigueAvg * 0.32 +
+            negativeRatio * 36 +
+            volatility * 16
+        ),
+        8,
+        96
+    );
+}
+
 async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<AnalysisFrame> {
     const metrics = computeMetrics(frame);
 
@@ -235,13 +400,21 @@ async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<
     }
 
     const faceAnalysis = await analyzeFaceFromVideo(video);
-    const fallbackEmotion = await detectEmotion(frame);
+    const modelEmotion = await detectEmotion(frame);
+    const fusedEmotion = combineEmotionSignals(faceAnalysis?.emotion ?? null, modelEmotion);
+    const stableEmotion = updateStableEmotion(fusedEmotion.label, fusedEmotion.score);
 
-    const emotionSource = faceAnalysis?.emotion ?? fallbackEmotion;
-    const stableEmotion = updateStableEmotion(emotionSource.label as EmotionLabel, emotionSource.score);
+    // Update blink detector with EAR and MAR values if face detected
+    let blinkInfo = { blinks: 0, isBlinking: false, isYawning: false };
+    if (faceAnalysis) {
+        blinkInfo = blinkDetector.update(faceAnalysis.eyeAspectRatio, faceAnalysis.mouthAspectRatio);
+    }
 
-    const attentionLevel = faceAnalysis?.attention.level ?? estimateAttention(metrics);
-    const fatigue = estimateFatigue(metrics, attentionLevel);
+    // Calculate attention using gaze and head pose
+    const attentionLevel = estimateAttention(faceAnalysis, stableEmotion);
+
+    // Calculate fatigue with new signature
+    const fatigue = estimateFatigue(faceAnalysis, blinkInfo, stableEmotion);
 
     pushLimited(runtimeState.attentionHistory, attentionLevel);
     pushLimited(runtimeState.fatigueHistory, fatigue.score);
@@ -252,14 +425,14 @@ async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<
         age: { age: runtimeState.stableAge, confidence: 0.82 },
         attention: {
             level: Math.round(average(runtimeState.attentionHistory) || attentionLevel),
-            gazingAway: faceAnalysis?.attention.gazingAway ?? attentionLevel < 45
+            gazingAway: attentionLevel < 55
         },
         fatigue: {
             level: fatigue.level,
             blinkRate: fatigue.blinkRate,
-            eyeAspectRatio: Number(fatigue.eyeAspectRatio.toFixed(2))
+            eyeAspectRatio: fatigue.eyeAspectRatio
         },
-        headPose: { yaw: 0, pitch: 0, roll: 0 }
+        headPose: faceAnalysis?.headPose ?? { yaw: 0, pitch: 0, roll: 0 }
     };
 
     return runtimeState.currentAnalysis;
@@ -269,7 +442,6 @@ async function frameLoop(ui: UIElements): Promise<void> {
     if (!isRunning) return;
 
     try {
-        // Capturar frame
         const frame = getFrame(ui.video, ui.overlay);
 
         await analyzeFrame(frame, ui.video);
@@ -283,7 +455,6 @@ async function frameLoop(ui: UIElements): Promise<void> {
         ui.status.textContent = '✓ Cámara activa';
         ui.status.style.color = '#00ff88';
 
-        // Siguiente frame
         requestAnimationFrame(() => frameLoop(ui));
     } catch (error) {
         console.error('Error en frame loop:', error);
@@ -301,10 +472,8 @@ async function init(): Promise<void> {
         stream = await startWebcam(ui.video);
         isRunning = true;
 
-        // Iniciar loop de frames
         frameLoop(ui);
 
-        // Event listeners
         ui.calibrateBtn.addEventListener('click', () => {
             ui.status.textContent = '🔄 Calibrando baseline (5s)...';
             ui.calibrateBtn.disabled = true;
@@ -341,13 +510,12 @@ async function startQuestionMode(ui: UIElements): Promise<void> {
         if (seconds < 0) {
             clearInterval(interval);
             ui.timer.style.display = 'none';
-            ui.deception.textContent = `${Math.floor(Math.random() * 60 + 20)}%`;
+            ui.deception.textContent = `${calculateDeceptionEstimate()}%`;
             ui.questionBtn.disabled = false;
         }
     }, 1000);
 }
 
-// Iniciar cuando el DOM esté listo
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
 } else {

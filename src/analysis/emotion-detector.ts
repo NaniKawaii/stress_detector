@@ -1,4 +1,5 @@
 import { EmotionResult } from '../types/index';
+import * as tf from '@tensorflow/tfjs';
 
 type EmotionLabel = 'Neutral' | 'Feliz' | 'Triste' | 'Enojado' | 'Sorprendido' | 'Asustado' | 'Disgustado';
 
@@ -10,7 +11,123 @@ interface RegionStats {
     edgeEnergy: number;
 }
 
+const EMOTION_LABELS: EmotionLabel[] = ['Enojado', 'Disgustado', 'Asustado', 'Feliz', 'Triste', 'Sorprendido', 'Neutral'];
+const MODEL_CANDIDATE_PATHS = [
+    new URL('../models/emotion/model.json', import.meta.url).toString(),
+    '/src/models/emotion/model.json',
+    '/models/emotion/model.json'
+];
+
+let emotionModel: tf.LayersModel | null = null;
+let modelLoadPromise: Promise<void> | null = null;
+let modelLoadFailed = false;
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+
+function softmax(values: number[]): number[] {
+    if (!values.length) return [];
+
+    const max = Math.max(...values);
+    const exps = values.map((value) => Math.exp(value - max));
+    const sum = exps.reduce((acc, value) => acc + value, 0) || 1;
+    return exps.map((value) => value / sum);
+}
+
+async function ensureModelLoaded(): Promise<void> {
+    if (emotionModel || modelLoadFailed) {
+        return;
+    }
+
+    if (!modelLoadPromise) {
+        modelLoadPromise = (async () => {
+            let loadedModel: tf.LayersModel | null = null;
+
+            for (const path of MODEL_CANDIDATE_PATHS) {
+                try {
+                    loadedModel = await tf.loadLayersModel(path);
+                    break;
+                } catch {
+                    continue;
+                }
+            }
+
+            if (!loadedModel) {
+                modelLoadFailed = true;
+                return;
+            }
+
+            emotionModel = loadedModel;
+        })().catch(() => {
+            modelLoadFailed = true;
+        });
+    }
+
+    await modelLoadPromise;
+}
+
+function inferInputShape(model: tf.LayersModel): { height: number; width: number; channels: number } {
+    const shape = model.inputs[0]?.shape;
+
+    const height = shape?.[1] && shape[1] > 0 ? shape[1] : 48;
+    const width = shape?.[2] && shape[2] > 0 ? shape[2] : 48;
+    const channels = shape?.[3] && shape[3] > 0 ? shape[3] : 1;
+
+    return {
+        height,
+        width,
+        channels
+    };
+}
+
+async function detectFromModel(frame: ImageData): Promise<EmotionResult | null> {
+    await ensureModelLoaded();
+    if (!emotionModel) {
+        return null;
+    }
+
+    const { height, width, channels } = inferInputShape(emotionModel);
+
+    const inputTensor = tf.tidy(() => {
+        const pixels = tf.browser.fromPixels(frame, channels === 1 ? 1 : 3).toFloat();
+        const resized = tf.image.resizeBilinear(pixels, [height, width], true);
+        const normalized = resized.div(255);
+        return normalized.expandDims(0);
+    });
+
+    const prediction = emotionModel.predict(inputTensor);
+    const outputTensor = Array.isArray(prediction) ? prediction[0] : prediction;
+    const data = Array.from(await outputTensor.data());
+
+    inputTensor.dispose();
+    if (Array.isArray(prediction)) {
+        prediction.forEach((tensor) => tensor.dispose());
+    } else {
+        prediction.dispose();
+    }
+
+    const probabilities = data.every((value) => value >= 0 && value <= 1)
+        ? data
+        : softmax(data);
+
+    if (!probabilities.length) {
+        return null;
+    }
+
+    let bestIndex = 0;
+    let bestValue = probabilities[0];
+
+    for (let index = 1; index < probabilities.length; index++) {
+        if (probabilities[index] > bestValue) {
+            bestValue = probabilities[index];
+            bestIndex = index;
+        }
+    }
+
+    return {
+        label: EMOTION_LABELS[bestIndex] ?? 'Neutral',
+        score: clamp(bestValue, 0.5, 0.99)
+    };
+}
 
 function getLuminance(r: number, g: number, b: number): number {
     return 0.299 * r + 0.587 * g + 0.114 * b;
@@ -130,6 +247,11 @@ function buildScore(label: EmotionLabel, faceStats: RegionStats, mouthStats: Reg
 }
 
 export async function detectEmotion(frame: ImageData): Promise<EmotionResult> {
+    const modelEmotion = await detectFromModel(frame);
+    if (modelEmotion) {
+        return modelEmotion;
+    }
+
     const faceStats = analyzeRegion(frame, 0.2, 0.18, 0.8, 0.86);
     const mouthStats = analyzeRegion(frame, 0.33, 0.56, 0.67, 0.82);
 
