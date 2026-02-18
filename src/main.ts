@@ -12,6 +12,7 @@ let stream: MediaStream | null = null;
 let isRunning = false;
 
 const DISPLAY_UPDATE_MS = 1200;
+const NO_FACE_THRESHOLD = 10; // ~0.33s a 30fps
 
 type EmotionLabel = 'Neutral' | 'Feliz' | 'Triste' | 'Enojado' | 'Sorprendido' | 'Asustado' | 'Disgustado';
 type FaceAnalysis = NonNullable<Awaited<ReturnType<typeof analyzeFaceFromVideo>>>;
@@ -48,6 +49,8 @@ interface RuntimeState {
         headMotion: number[];
         emotionVolatility: number[];
     };
+    facePresent: boolean;
+    noFaceFrames: number;
 }
 
 const runtimeState: RuntimeState = {
@@ -75,6 +78,8 @@ const runtimeState: RuntimeState = {
         headMotion: [],
         emotionVolatility: []
     },
+    facePresent: true,
+    noFaceFrames: 0,
     currentAnalysis: {
         emotion: { label: 'Neutral', score: 0.75 },
         age: { age: 28, confidence: 0.8 },
@@ -515,6 +520,24 @@ function calculateDeceptionEstimate(): number {
     return Math.round(deceptionProbability);
 }
 
+function setNoFaceUI(ui: UIElements): void {
+    ui.status.textContent = '⚠️ Sin rostro detectado';
+    ui.age.textContent = '--';
+    ui.emotion.textContent = '--';
+    ui.attention.textContent = '--%';
+    ui.fatigue.textContent = '--';
+    ui.deception.textContent = '--%';
+}
+
+function resetSmoothers(): void {
+    runtimeState.smoothedAttention = 75;
+    runtimeState.smoothedFatigue = 25;
+    runtimeState.attentionHistory = [];
+    runtimeState.fatigueHistory = [];
+    runtimeState.earHistory = [];
+    runtimeState.blinkRateHistory = [];
+}
+
 async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<AnalysisFrame> {
     if (!runtimeState.initialized) {
         runtimeState.stableAge = 24;
@@ -585,6 +608,28 @@ async function frameLoop(ui: UIElements): Promise<void> {
     try {
         const frame = getFrame(ui.video, ui.overlay);
 
+        // GATING: Check face detection
+        const faceAnalysis = await analyzeFaceFromVideo(ui.video);
+        const hasFace = faceAnalysis !== null;
+
+        if (!hasFace) {
+            runtimeState.noFaceFrames++;
+            if (runtimeState.noFaceFrames >= NO_FACE_THRESHOLD) {
+                setNoFaceUI(ui);
+                runtimeState.facePresent = false;
+            }
+            requestAnimationFrame(() => frameLoop(ui));
+            return; // 👈 Corta cálculos: no continúa con edad/emoción/atención/etc
+        }
+
+        // Face volvió: reset smoothers si estuvo ausente
+        if (runtimeState.noFaceFrames >= NO_FACE_THRESHOLD) {
+            resetSmoothers();
+        }
+        runtimeState.noFaceFrames = 0;
+        runtimeState.facePresent = true;
+
+        // Ahora SÍ análisis completo
         await analyzeFrame(frame, ui.video);
 
         const now = Date.now();
@@ -593,7 +638,7 @@ async function frameLoop(ui: UIElements): Promise<void> {
             runtimeState.lastDisplayUpdate = now;
         }
 
-        ui.status.textContent = '✓ Cámara activa';
+        ui.status.textContent = '✓ Rostro detectado';
         ui.status.style.color = '#00ff88';
 
         requestAnimationFrame(() => frameLoop(ui));
@@ -612,6 +657,24 @@ async function init(): Promise<void> {
         ui.status.textContent = 'Solicitando acceso a cámara...';
         stream = await startWebcam(ui.video);
         isRunning = true;
+
+        // Validar que el stream se cargó correctamente
+        await new Promise<void>((resolve) => {
+            ui.video.onloadedmetadata = () => {
+                console.log(`[Stream] videoWidth: ${ui.video.videoWidth}, videoHeight: ${ui.video.videoHeight}`);
+                if (ui.video.videoWidth === 0 || ui.video.videoHeight === 0) {
+                    console.warn('[Stream] ⚠️ Video dimensions are 0x0 - camera may not be accessible');
+                }
+                resolve();
+            };
+            // Fallback en caso de que onloadedmetadata no dispare
+            setTimeout(() => resolve(), 1000);
+        });
+
+        // Asegurar que canvas tiene el mismo tamaño que video
+        ui.overlay.width = ui.video.videoWidth;
+        ui.overlay.height = ui.video.videoHeight;
+        console.log(`[Canvas] Set to ${ui.overlay.width}x${ui.overlay.height}`);
 
         frameLoop(ui);
 
