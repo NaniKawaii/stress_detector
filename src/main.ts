@@ -547,7 +547,7 @@ async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<
 
     const faceAnalysis = await analyzeFaceFromVideo(video);
     const ageEstimate = estimateAge(faceAnalysis);
-    const modelEmotion = await detectEmotion(frame);
+    const modelEmotion = await detectEmotion(frame, faceAnalysis?.blendshapes ?? null);
     const fusedEmotion = combineEmotionSignals(faceAnalysis?.emotion ?? null, modelEmotion);
     const stableEmotion = updateStableEmotion(fusedEmotion.label, fusedEmotion.score);
 

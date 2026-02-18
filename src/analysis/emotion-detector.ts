@@ -80,6 +80,7 @@ function inferInputShape(model: tf.LayersModel): { height: number; width: number
 async function detectFromModel(frame: ImageData): Promise<EmotionResult | null> {
     await ensureModelLoaded();
     if (!emotionModel) {
+        console.warn('[EmotionDetector] Model not loaded, will use heuristic');
         return null;
     }
 
@@ -125,13 +126,16 @@ async function detectFromModel(frame: ImageData): Promise<EmotionResult | null> 
     const margin = (sorted[0] || 0) - (sorted[1] || 0);
 
     if (bestValue < 0.4 || margin < 0.08) {
+        console.debug('[EmotionDetector] Model confidence too low', { bestValue, margin, label: EMOTION_LABELS[bestIndex] });
         return null;
     }
 
-    return {
+    const result = {
         label: EMOTION_LABELS[bestIndex] ?? 'Neutral',
         score: clamp(bestValue, 0.35, 0.95)
     };
+    console.debug('[EmotionDetector] Model result:', result);
+    return result;
 }
 
 function getLuminance(r: number, g: number, b: number): number {
@@ -241,6 +245,60 @@ function inferEmotionLabel(faceStats: RegionStats, mouthStats: RegionStats): Emo
     return 'Neutral';
 }
 
+function inferEmotionFromBlendshapes(blendshapes: Array<{ categoryName: string; score: number }>): EmotionLabel {
+    const blend: Record<string, number> = {};
+    blendshapes.forEach((b) => {
+        blend[b.categoryName] = b.score;
+    });
+
+    // Feliz: comisuras de boca hacia arriba, ojos entrecerrados (smile)
+    const mouthSmile = Math.max(blend['mouthSmileLeft'] ?? 0, blend['mouthSmileRight'] ?? 0);
+    const cheekSquint = Math.max(blend['eyeSquintLeft'] ?? 0, blend['eyeSquintRight'] ?? 0);
+    const happyScore = mouthSmile * 0.6 + cheekSquint * 0.3;
+
+    // Triste: comisuras hacia abajo, cejas bajas
+    const mouthFrown = Math.max(blend['mouthFrownLeft'] ?? 0, blend['mouthFrownRight'] ?? 0);
+    const browDown = Math.max(blend['browDownLeft'] ?? 0, blend['browDownRight'] ?? 0);
+    const sadScore = mouthFrown * 0.6 + browDown * 0.3;
+
+    // Sorprendido: boca abierta, cejas arriba
+    const jawOpen = blend['jawOpen'] ?? 0;
+    const browUp = Math.max(blend['browInnerUp'] ?? 0, blend['browOuterUpLeft'] ?? 0, blend['browOuterUpRight'] ?? 0);
+    const surprisedScore = jawOpen * 0.6 + browUp * 0.3;
+
+    // Asustado: ojos muy abiertos, boca abierta
+    const eyeWide = Math.max(blend['eyeWideLeft'] ?? 0, blend['eyeWideRight'] ?? 0);
+    const fearScore = eyeWide * 0.5 + jawOpen * 0.4;
+
+    // Enojado: cejas fruncidas
+    const browInnerUp = blend['browInnerUp'] ?? 0;
+    const angryScore = (1 - browInnerUp) * 0.7;  // Cejas bajas/fruncidas
+
+    const scores: Record<EmotionLabel, number> = {
+        'Feliz': happyScore,
+        'Triste': sadScore,
+        'Sorprendido': surprisedScore,
+        'Asustado': fearScore,
+        'Enojado': angryScore,
+        'Disgustado': 0,
+        'Neutral': 0
+    };
+
+    let best: EmotionLabel = 'Neutral';
+    let bestScore = 0.2;  // Umbral mínimo para no ser Neutral
+
+    Object.entries(scores).forEach(([emotion, score]) => {
+        if (score > bestScore) {
+            bestScore = score;
+            best = emotion as EmotionLabel;
+        }
+    });
+
+    console.debug('[EmotionDetector] Blendshape inference:', { best, scores });
+    return best;
+}
+
+
 function buildScore(label: EmotionLabel, faceStats: RegionStats, mouthStats: RegionStats): number {
     const base = label === 'Feliz'
         ? 0.6 + mouthStats.brightNeutralRatio * 1.6 + mouthStats.edgeEnergy / 85
@@ -251,12 +309,28 @@ function buildScore(label: EmotionLabel, faceStats: RegionStats, mouthStats: Reg
     return clamp(base, 0.55, 0.96);
 }
 
-export async function detectEmotion(frame: ImageData): Promise<EmotionResult> {
+export async function detectEmotion(
+    frame: ImageData,
+    blendshapes?: Array<{ categoryName: string; score: number }> | null
+): Promise<EmotionResult> {
     const modelEmotion = await detectFromModel(frame);
     if (modelEmotion) {
+        console.log('[EmotionDetector] Using MODEL:', modelEmotion);
         return modelEmotion;
     }
 
+    // Fallback: use blendshapes (geometry) if available
+    if (blendshapes && blendshapes.length > 0) {
+        console.log('[EmotionDetector] Using BLENDSHAPES (geometry-based)');
+        const label = inferEmotionFromBlendshapes(blendshapes);
+        return {
+            label,
+            score: 0.65  // Conservative confidence for blendshape fallback
+        };
+    }
+
+    // Last resort: brightness-based heuristic (only if no other option)
+    console.log('[EmotionDetector] Using HEURISTIC (brightness-based - fallback)');
     const faceStats = analyzeRegion(frame, 0.2, 0.18, 0.8, 0.86);
     const mouthStats = analyzeRegion(frame, 0.33, 0.56, 0.67, 0.82);
 
