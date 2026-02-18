@@ -1,42 +1,66 @@
+export interface BaselineMetrics {
+    attentionMean: number;
+    attentionStd: number;
+    blinkRateMean: number;
+    blinkRateStd: number;
+    fatigueMean: number;
+    fatigueStd: number;
+    headMotionMean: number;
+    headMotionStd: number;
+    emotionVolatilityMean: number;
+}
+
 export class SignalProcessor {
-    private age: number | null = null;
-    private emotion: string | null = null;
-    private attentionLevel: number | null = null;
-    private fatigueLevel: number | null = null;
-    private personalityTraits: string[] = [];
+    private baseline: BaselineMetrics | null = null;
+    private currentSignals = {
+        attention: 0,
+        blinkRate: 0,
+        fatigue: 0,
+        headMotion: 0,
+        emotionVolatility: 0
+    };
 
     constructor() {}
 
-    public processSignals(age: number, emotion: string, attentionLevel: number, fatigueLevel: number, personalityTraits: string[]): void {
-        this.age = age;
-        this.emotion = emotion;
-        this.attentionLevel = attentionLevel;
-        this.fatigueLevel = fatigueLevel;
-        this.personalityTraits = personalityTraits;
-
-        // Additional processing logic can be added here
+    public setBaseline(baseline: BaselineMetrics): void {
+        this.baseline = baseline;
     }
 
-    public getStressIndicators(): { stressLevel: number; incongruence: boolean } {
-        let stressLevel = 0;
+    public updateSignals(
+        attention: number,
+        blinkRate: number,
+        fatigue: number,
+        headMotion: number,
+        emotionVolatility: number
+    ): void {
+        this.currentSignals = {
+            attention,
+            blinkRate,
+            fatigue,
+            headMotion,
+            emotionVolatility
+        };
+    }
 
-        // Example logic to calculate stress level based on various metrics
-        if (this.emotion === 'stressed') {
-            stressLevel += 50;
-        }
-        if (this.fatigueLevel && this.fatigueLevel > 5) {
-            stressLevel += 30;
-        }
-        if (this.attentionLevel && this.attentionLevel < 3) {
-            stressLevel += 20;
+    public calculateZScores(): Record<string, number> {
+        if (!this.baseline) {
+            return {};
         }
 
-        const incongruence =
-            this.age !== null &&
-            this.attentionLevel !== null &&
-            this.age < 30 &&
-            this.attentionLevel < 3;
+        const { attention, blinkRate, fatigue, headMotion, emotionVolatility } = this.currentSignals;
+        const z: Record<string, number> = {};
 
-        return { stressLevel, incongruence };
+        // Calculate z-scores: |value - mean| / std
+        z.attention = Math.abs(attention - this.baseline.attentionMean) / Math.max(this.baseline.attentionStd, 0.1);
+        z.blinkRate = Math.abs(blinkRate - this.baseline.blinkRateMean) / Math.max(this.baseline.blinkRateStd, 1);
+        z.fatigue = Math.abs(fatigue - this.baseline.fatigueMean) / Math.max(this.baseline.fatigueStd, 1);
+        z.headMotion = Math.abs(headMotion - this.baseline.headMotionMean) / Math.max(this.baseline.headMotionStd, 0.1);
+        z.emotionVolatility = emotionVolatility / Math.max(this.baseline.emotionVolatilityMean, 0.1);
+
+        return z;
+    }
+
+    public getSignals() {
+        return this.currentSignals;
     }
 }

@@ -5,6 +5,8 @@ import { analyzeFaceFromVideo } from './analysis/face-analyzer';
 import { blinkDetector } from './analysis/blink-detector';
 import { AnalysisFrame, EmotionResult } from './types/index';
 import { BIG_FIVE_QUESTIONS, BigFive, buildBigFiveSummary, computeBigFive } from './analysis/personality-analyzer';
+import { SignalProcessor } from './deception/signal-processor';
+import { calculateDeceptionProbability } from './deception/probability-calculator';
 
 let stream: MediaStream | null = null;
 let isRunning = false;
@@ -37,6 +39,15 @@ interface RuntimeState {
     yawnCount: number;
     baselineAgeSamples: number[];
     personalityProfile: BigFive | null;
+    signalProcessor: SignalProcessor;
+    isCalibrating: boolean;
+    calibrationData: {
+        attention: number[];
+        blinkRate: number[];
+        fatigue: number[];
+        headMotion: number[];
+        emotionVolatility: number[];
+    };
 }
 
 const runtimeState: RuntimeState = {
@@ -55,6 +66,15 @@ const runtimeState: RuntimeState = {
     yawnCount: 0,
     baselineAgeSamples: [],
     personalityProfile: null,
+    signalProcessor: new SignalProcessor(),
+    isCalibrating: false,
+    calibrationData: {
+        attention: [],
+        blinkRate: [],
+        fatigue: [],
+        headMotion: [],
+        emotionVolatility: []
+    },
     currentAnalysis: {
         emotion: { label: 'Neutral', score: 0.75 },
         age: { age: 28, confidence: 0.8 },
@@ -450,34 +470,44 @@ function readPersonalityAnswers(container: HTMLElement): number[] {
 }
 
 function calculateDeceptionEstimate(): number {
-    const attentionAvg = average(runtimeState.attentionHistory);
-    const fatigueAvg = average(runtimeState.fatigueHistory);
+    // Get current metrics
+    const attentionAvg = average(runtimeState.attentionHistory) || 75;
+    const blinkRate = runtimeState.currentAnalysis.fatigue.blinkRate;
+    const fatigueAvg = average(runtimeState.fatigueHistory) || 25;
+    const headPose = runtimeState.currentAnalysis.headPose;
+    const headMotion = Math.sqrt(
+        Math.pow(headPose.yaw, 2) + Math.pow(headPose.pitch, 2) + Math.pow(headPose.roll, 2)
+    );
+
+    // Calculate emotion volatility: std of recent emotion scores
     const recentEmotions = runtimeState.emotionHistory.slice(-20);
-
-    const negativeRatio = recentEmotions.length
-        ? recentEmotions.filter((emotion) => emotion === 'Enojado' || emotion === 'Asustado' || emotion === 'Triste').length / recentEmotions.length
-        : 0;
-
-    let transitions = 0;
-    for (let index = 1; index < recentEmotions.length; index++) {
-        if (recentEmotions[index] !== recentEmotions[index - 1]) {
-            transitions++;
+    let emotionVolatility = 0;
+    if (recentEmotions.length > 0) {
+        let transitions = 0;
+        for (let i = 1; i < recentEmotions.length; i++) {
+            if (recentEmotions[i] !== recentEmotions[i - 1]) {
+                transitions++;
+            }
         }
+        emotionVolatility = recentEmotions.length > 1 ? transitions / (recentEmotions.length - 1) : 0;
     }
 
-    const volatility = recentEmotions.length > 1 ? transitions / (recentEmotions.length - 1) : 0;
-
-    return clamp(
-        Math.round(
-            20 +
-            (100 - attentionAvg) * 0.24 +
-            fatigueAvg * 0.32 +
-            negativeRatio * 36 +
-            volatility * 16
-        ),
-        8,
-        96
+    // Update signals in processor
+    runtimeState.signalProcessor.updateSignals(
+        attentionAvg,
+        blinkRate,
+        fatigueAvg,
+        headMotion,
+        emotionVolatility
     );
+
+    // Calculate z-scores
+    const zScores = runtimeState.signalProcessor.calculateZScores();
+
+    // Calculate deception probability (0-100)
+    const deceptionProbability = calculateDeceptionProbability(zScores);
+
+    return Math.round(deceptionProbability);
 }
 
 async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<AnalysisFrame> {
@@ -523,6 +553,23 @@ async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<
         },
         headPose: faceAnalysis?.headPose ?? { yaw: 0, pitch: 0, roll: 0 }
     };
+
+    // Collect calibration data if calibrating
+    if (runtimeState.isCalibrating) {
+        runtimeState.calibrationData.attention.push(attentionLevel);
+        runtimeState.calibrationData.blinkRate.push(fatigue.blinkRate);
+        runtimeState.calibrationData.fatigue.push(fatigue.score);
+
+        // Head motion: magnitude of head pose vectors
+        const headPose = runtimeState.currentAnalysis.headPose;
+        const headMotion = Math.sqrt(
+            Math.pow(headPose.yaw, 2) + Math.pow(headPose.pitch, 2) + Math.pow(headPose.roll, 2)
+        );
+        runtimeState.calibrationData.headMotion.push(headMotion);
+
+        // Emotion volatility: use emotion score standard deviation
+        runtimeState.calibrationData.emotionVolatility.push(stableEmotion.score);
+    }
 
     return runtimeState.currentAnalysis;
 }
@@ -572,8 +619,40 @@ async function init(): Promise<void> {
             runtimeState.emotionHistory = [];
             runtimeState.emotionScores = {};
             runtimeState.baselineAgeSamples = [];
+            runtimeState.isCalibrating = true;
+            runtimeState.calibrationData = {
+                attention: [],
+                blinkRate: [],
+                fatigue: [],
+                headMotion: [],
+                emotionVolatility: []
+            };
 
             setTimeout(() => {
+                runtimeState.isCalibrating = false;
+                
+                // Calculate baseline metrics (mean and std)
+                const calculateStats = (data: number[]) => {
+                    if (data.length === 0) return { mean: 0, std: 0.1 };
+                    const mean = data.reduce((a, b) => a + b, 0) / data.length;
+                    const variance = data.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / data.length;
+                    const std = Math.sqrt(variance) || 0.1;
+                    return { mean, std };
+                };
+
+                const baseline = {
+                    attentionMean: calculateStats(runtimeState.calibrationData.attention).mean,
+                    attentionStd: calculateStats(runtimeState.calibrationData.attention).std,
+                    blinkRateMean: calculateStats(runtimeState.calibrationData.blinkRate).mean,
+                    blinkRateStd: calculateStats(runtimeState.calibrationData.blinkRate).std,
+                    fatigueMean: calculateStats(runtimeState.calibrationData.fatigue).mean,
+                    fatigueStd: calculateStats(runtimeState.calibrationData.fatigue).std,
+                    headMotionMean: calculateStats(runtimeState.calibrationData.headMotion).mean,
+                    headMotionStd: calculateStats(runtimeState.calibrationData.headMotion).std,
+                    emotionVolatilityMean: calculateStats(runtimeState.calibrationData.emotionVolatility).mean
+                };
+
+                runtimeState.signalProcessor.setBaseline(baseline);
                 ui.status.textContent = '✓ Baseline calibrado';
                 ui.calibrateBtn.disabled = false;
             }, 5000);
