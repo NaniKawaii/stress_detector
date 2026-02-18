@@ -31,6 +31,7 @@ interface RuntimeState {
     emotionHistory: EmotionLabel[];
     currentAnalysis: AnalysisFrame;
     smoothedAttention: number;
+    smoothedFatigue: number;
     earHistory: number[];
     blinkRateHistory: number[];
     yawnCount: number;
@@ -48,6 +49,7 @@ const runtimeState: RuntimeState = {
     fatigueHistory: [],
     emotionHistory: [],
     smoothedAttention: 75,
+    smoothedFatigue: 25,
     earHistory: [],
     blinkRateHistory: [],
     yawnCount: 0,
@@ -391,11 +393,14 @@ function estimateFatigue(
         100
     );
 
+    // Apply EMA smoothing to fatigue score
+    runtimeState.smoothedFatigue = applyEMA(fatigueScore, runtimeState.smoothedFatigue, 0.18);
+
     const level =
-        fatigueScore >= 67 ? 'Alta' : fatigueScore >= 34 ? 'Media' : 'Baja';
+        runtimeState.smoothedFatigue >= 67 ? 'Alta' : runtimeState.smoothedFatigue >= 34 ? 'Media' : 'Baja';
 
     return {
-        score: fatigueScore,
+        score: Math.round(runtimeState.smoothedFatigue),
         level,
         blinkRate: Math.round(blinkRate),
         eyeAspectRatio: Number(ear.toFixed(2))
