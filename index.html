@@ -158,6 +158,59 @@
             text-align: center;
         }
 
+
+        .personality-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.72);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            z-index: 20;
+        }
+
+        .personality-modal.open {
+            display: flex;
+        }
+
+        .personality-panel {
+            width: min(760px, 96vw);
+            max-height: 90vh;
+            overflow-y: auto;
+            background: #16213e;
+            border: 1px solid #314a79;
+            border-radius: 10px;
+            padding: 18px;
+        }
+
+        .question-item {
+            background: #0f3460;
+            border-radius: 6px;
+            padding: 10px;
+            margin: 8px 0;
+            display: grid;
+            grid-template-columns: 1fr 80px;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .likert-select {
+            background: #0b2748;
+            color: #eee;
+            border: 1px solid #355b8f;
+            border-radius: 4px;
+            padding: 8px;
+            width: 100%;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 12px;
+        }
+
         h2 {
             font-size: 14px;
             color: #aaa;
@@ -214,10 +267,24 @@
             <div class="buttons">
                 <button class="btn-primary" id="calibrate-btn">Calibrar Baseline</button>
                 <button class="btn-primary" id="question-btn">Hacer Pregunta (7s)</button>
+                <button class="btn-secondary" id="personality-test-btn">Test de personalidad (1 min)</button>
             </div>
 
             <div class="disclaimer">
-                ⚠️ <strong>Descargo de responsabilidad:</strong> Este sistema NO detecta mentiras con certeza. Solo estima señales asociadas a estrés e incongruencia. Propósito experimental/educativo.
+                ⚠️ <strong>Descargo de responsabilidad:</strong> Este sistema NO detecta mentiras con certeza. Solo estima señales asociadas a estrés e incongruencia. Propósito experimental/educativo.<br><br>🧠 <strong>Personalidad:</strong> Resultado orientativo (no diagnóstico). Basado en autopercepción y un cuestionario corto tipo Big Five.
+            </div>
+        </div>
+    </div>
+
+
+    <div class="personality-modal" id="personality-modal">
+        <div class="personality-panel">
+            <h2>Mini test Big Five (OCEAN)</h2>
+            <p style="font-size:12px;color:#a7b4cf;margin-bottom:10px;">Escala 1–5: 1 = Totalmente en desacuerdo · 5 = Totalmente de acuerdo.</p>
+            <div id="personality-questions"></div>
+            <div class="modal-actions">
+                <button class="btn-secondary" id="personality-cancel-btn">Cerrar</button>
+                <button class="btn-primary" id="personality-submit-btn">Calcular</button>
             </div>
         </div>
     </div>

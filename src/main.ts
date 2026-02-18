@@ -4,6 +4,7 @@ import { detectEmotion } from './analysis/emotion-detector';
 import { analyzeFaceFromVideo } from './analysis/face-analyzer';
 import { blinkDetector } from './analysis/blink-detector';
 import { AnalysisFrame, EmotionResult } from './types/index';
+import { BIG_FIVE_QUESTIONS, BigFive, buildBigFiveSummary, computeBigFive } from './analysis/personality-analyzer';
 
 let stream: MediaStream | null = null;
 let isRunning = false;
@@ -34,6 +35,7 @@ interface RuntimeState {
     blinkRateHistory: number[];
     yawnCount: number;
     baselineAgeSamples: number[];
+    personalityProfile: BigFive | null;
 }
 
 const runtimeState: RuntimeState = {
@@ -50,6 +52,7 @@ const runtimeState: RuntimeState = {
     blinkRateHistory: [],
     yawnCount: 0,
     baselineAgeSamples: [],
+    personalityProfile: null,
     currentAnalysis: {
         emotion: { label: 'Neutral', score: 0.75 },
         age: { age: 28, confidence: 0.8 },
@@ -72,6 +75,11 @@ interface UIElements {
     timer: HTMLElement;
     calibrateBtn: HTMLButtonElement;
     questionBtn: HTMLButtonElement;
+    personalityBtn: HTMLButtonElement;
+    personalityModal: HTMLElement;
+    personalityQuestions: HTMLElement;
+    personalitySubmitBtn: HTMLButtonElement;
+    personalityCancelBtn: HTMLButtonElement;
 }
 
 function getUIElements(): UIElements {
@@ -87,7 +95,12 @@ function getUIElements(): UIElements {
         deception: document.getElementById('deception') as HTMLElement,
         timer: document.getElementById('timer') as HTMLElement,
         calibrateBtn: document.getElementById('calibrate-btn') as HTMLButtonElement,
-        questionBtn: document.getElementById('question-btn') as HTMLButtonElement
+        questionBtn: document.getElementById('question-btn') as HTMLButtonElement,
+        personalityBtn: document.getElementById('personality-test-btn') as HTMLButtonElement,
+        personalityModal: document.getElementById('personality-modal') as HTMLElement,
+        personalityQuestions: document.getElementById('personality-questions') as HTMLElement,
+        personalitySubmitBtn: document.getElementById('personality-submit-btn') as HTMLButtonElement,
+        personalityCancelBtn: document.getElementById('personality-cancel-btn') as HTMLButtonElement
     };
 }
 
@@ -390,22 +403,45 @@ function estimateFatigue(
 }
 
 function buildPersonalitySummary(): string {
-    const attentionAvg = average(runtimeState.attentionHistory);
-    const fatigueAvg = average(runtimeState.fatigueHistory);
-    const emotions = runtimeState.emotionHistory;
+    if (!runtimeState.personalityProfile) {
+        return 'Completa el test de personalidad';
+    }
 
-    const totalEmotions = emotions.length || 1;
-    const positive = emotions.filter((emotion) => emotion === 'Feliz' || emotion === 'Sorprendido').length / totalEmotions;
-    const negative = emotions.filter((emotion) => emotion === 'Triste' || emotion === 'Enojado' || emotion === 'Asustado').length / totalEmotions;
-    const uniqueEmotions = new Set(emotions).size;
+    return buildBigFiveSummary(runtimeState.personalityProfile);
+}
 
-    const openness = clamp(Math.round(45 + uniqueEmotions * 8), 25, 95);
-    const conscientiousness = clamp(Math.round(attentionAvg), 20, 95);
-    const extraversion = clamp(Math.round(40 + positive * 55), 20, 95);
-    const agreeableness = clamp(Math.round(70 - negative * 35), 20, 95);
-    const neuroticism = clamp(Math.round(35 + fatigueAvg * 0.5 + negative * 35), 20, 95);
+function renderPersonalityQuestions(container: HTMLElement): void {
+    const options = [
+        { value: 1, text: '1 - Totalmente en desacuerdo' },
+        { value: 2, text: '2 - En desacuerdo' },
+        { value: 3, text: '3 - Neutral' },
+        { value: 4, text: '4 - De acuerdo' },
+        { value: 5, text: '5 - Totalmente de acuerdo' }
+    ];
 
-    return `O:${openness} C:${conscientiousness} E:${extraversion} A:${agreeableness} N:${neuroticism}`;
+    container.innerHTML = BIG_FIVE_QUESTIONS.map((question) => {
+        const choices = options
+            .map((option) => `<option value="${option.value}" ${option.value === 3 ? 'selected' : ''}>${option.text}</option>`)
+            .join('');
+
+        return `
+            <div class="question-item">
+                <label for="bf-q-${question.id}">${question.id}. ${question.text}</label>
+                <select id="bf-q-${question.id}" class="likert-select" data-question-id="${question.id}">${choices}</select>
+            </div>
+        `;
+    }).join('');
+}
+
+function readPersonalityAnswers(container: HTMLElement): number[] {
+    const answers: number[] = [];
+
+    BIG_FIVE_QUESTIONS.forEach((question) => {
+        const select = container.querySelector(`#bf-q-${question.id}`) as HTMLSelectElement | null;
+        answers.push(Number(select?.value || 3));
+    });
+
+    return answers;
 }
 
 function calculateDeceptionEstimate(): number {
@@ -538,8 +574,27 @@ async function init(): Promise<void> {
             }, 5000);
         });
 
+        renderPersonalityQuestions(ui.personalityQuestions);
+
         ui.questionBtn.addEventListener('click', () => {
             startQuestionMode(ui);
+        });
+
+        ui.personalityBtn.addEventListener('click', () => {
+            ui.personalityModal.classList.add('open');
+        });
+
+        ui.personalityCancelBtn.addEventListener('click', () => {
+            ui.personalityModal.classList.remove('open');
+        });
+
+        ui.personalitySubmitBtn.addEventListener('click', () => {
+            const answers = readPersonalityAnswers(ui.personalityQuestions);
+            runtimeState.personalityProfile = computeBigFive(answers);
+            ui.personality.textContent = buildPersonalitySummary();
+            ui.personalityModal.classList.remove('open');
+            ui.status.textContent = '✓ Test de personalidad actualizado';
+            ui.status.style.color = '#00ff88';
         });
     } catch (error) {
         ui.status.textContent = `✗ ${error instanceof Error ? error.message : 'Error desconocido'}`;
