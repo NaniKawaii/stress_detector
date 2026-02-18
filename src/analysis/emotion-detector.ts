@@ -12,11 +12,7 @@ interface RegionStats {
 }
 
 const EMOTION_LABELS: EmotionLabel[] = ['Enojado', 'Disgustado', 'Asustado', 'Feliz', 'Triste', 'Sorprendido', 'Neutral'];
-const MODEL_CANDIDATE_PATHS = [
-    new URL('../models/emotion/model.json', import.meta.url).toString(),
-    '/src/models/emotion/model.json',
-    '/models/emotion/model.json'
-];
+const MODEL_PATH = '/models/emotion/model.json';
 
 let emotionModel: tf.LayersModel | null = null;
 let modelLoadPromise: Promise<void> | null = null;
@@ -54,26 +50,14 @@ async function ensureModelLoaded(): Promise<void> {
 
     if (!modelLoadPromise) {
         modelLoadPromise = (async () => {
-            let loadedModel: tf.LayersModel | null = null;
-
-            for (const path of MODEL_CANDIDATE_PATHS) {
-                try {
-                    loadedModel = await tf.loadLayersModel(path);
-                    break;
-                } catch {
-                    continue;
-                }
-            }
-
-            if (!loadedModel) {
+            try {
+                emotionModel = await tf.loadLayersModel(MODEL_PATH);
+                console.log('[EmotionDetector] Model loaded from', MODEL_PATH);
+            } catch (error) {
                 modelLoadFailed = true;
-                return;
+                console.error('[EmotionDetector] Failed to load from', MODEL_PATH, error);
             }
-
-            emotionModel = loadedModel;
-        })().catch(() => {
-            modelLoadFailed = true;
-        });
+        })();
     }
 
     await modelLoadPromise;
