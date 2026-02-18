@@ -300,21 +300,40 @@ function estimateAge(faceAnalysis: FaceAnalysis | null): { age: number; confiden
     const blend = faceAnalysis.blendshapes || [];
     const getBlend = (name: string): number => blend.find((item) => item.categoryName === name)?.score || 0;
 
+    // Aging indicators: wrinkles, sagging, expression depth
     const brow = (getBlend('browInnerUp') + getBlend('browOuterUpLeft') + getBlend('browOuterUpRight')) / 3;
     const smile = (getBlend('mouthSmileLeft') + getBlend('mouthSmileRight')) / 2;
     const frown = (getBlend('mouthFrownLeft') + getBlend('mouthFrownRight')) / 2;
     const eyeSquint = (getBlend('eyeSquintLeft') + getBlend('eyeSquintRight')) / 2;
-
+    
+    // Advanced aging signals: cheek/jaw sagging, nasolabial depth
+    const cheekSquint = (getBlend('cheekSquintLeft') + getBlend('cheekSquintRight')) / 2;
+    const cheekPuff = (getBlend('cheekPuff')) || 0;
+    const noseSneer = (getBlend('noseSneerLeft') + getBlend('noseSneerRight')) / 2;
+    const mouthUpperUp = (getBlend('mouthUpperUpLeft') + getBlend('mouthUpperUpRight')) / 2;
+    
+    // Eye openness: lower EAR can indicate drooping eyelids (age-related)
     const normalizedEar = clamp((faceAnalysis.eyeAspectRatio - 0.2) / 0.16, 0, 1);
 
+    // Age formula: base 25 + offsets
+    // - Lower EAR (droopy eyes) → +aging
+    // - Eye squint → +aging (crow's feet indicator)
+    // - Frown depth → +aging (forehead lines)
+    // - Cheek squint → +aging (mid-face sagging)
+    // - Smile → -aging (skin elasticity)
+    // - Brow movement → -aging (active expression)
     const ageOffset =
-        (1 - normalizedEar) * 6 +
-        eyeSquint * 5 +
-        frown * 3 -
-        smile * 4 -
-        brow * 3;
+        (1 - normalizedEar) * 8 +
+        eyeSquint * 10 +
+        frown * 6 +
+        cheekSquint * 12 +
+        noseSneer * 8 +
+        cheekPuff * 4 -
+        smile * 5 -
+        brow * 4 -
+        mouthUpperUp * 3;
 
-    const instantaneousAge = clamp(Math.round(22 + ageOffset), 18, 40);
+    const instantaneousAge = clamp(Math.round(25 + ageOffset), 16, 70);
 
     pushLimited(runtimeState.baselineAgeSamples, instantaneousAge, 45);
 
@@ -348,25 +367,31 @@ function estimateAttention(
         return clamp(75 - emotionPenalty, 20, 99);
     }
 
-    // Extract eye gaze from individual eye look metrics
-    const gazeAway = Math.max(
-        faceAnalysis.eyeMetrics.eyeLookOut,
-        faceAnalysis.eyeMetrics.eyeLookUp,
-        faceAnalysis.eyeMetrics.eyeLookDown
-    );
+    // Normalize eye gaze metrics (each is 0-1 range from blendshapes)
+    const gazeOut = faceAnalysis.eyeMetrics.eyeLookOut;
+    const gazeUp = faceAnalysis.eyeMetrics.eyeLookUp;
+    const gazeDown = faceAnalysis.eyeMetrics.eyeLookDown;
     
-    // Extract head pose: yaw and pitch from transformation
-    const headYaw = Math.abs(faceAnalysis.headPose.yaw || 0) / 45; // Normalize to 0-1 (45° max)
-    const headPitch = Math.abs(faceAnalysis.headPose.pitch || 0) / 45;
-    const headAway = Math.max(Math.min(headYaw, 1), Math.min(headPitch, 1));
+    // Gaze distraction: higher when looking away from center
+    const gazeAway = Math.max(gazeOut, gazeUp * 0.7, gazeDown * 0.7);
     
-    // Apply attention formula: 100 * (1 - clamp(0.6*gaze_away + 0.4*head_away, 0, 1))
-    const attentionRaw = 100 * (1 - clamp(0.6 * gazeAway + 0.4 * headAway, 0, 1));
+    // Head pose: yaw and pitch (normalized to 0-1)
+    const headYaw = Math.min(Math.abs(faceAnalysis.headPose.yaw || 0) / 35, 1);
+    const headPitch = Math.min(Math.abs(faceAnalysis.headPose.pitch || 0) / 30, 1);
+    const headAway = Math.max(headYaw, headPitch * 0.8);
     
-    // Apply EMA smoothing
-    runtimeState.smoothedAttention = applyEMA(attentionRaw, runtimeState.smoothedAttention, 0.15);
+    // Blink penalty: too much blinking reduces attention
+    const blinkPenalty = Math.min(faceAnalysis.eyeMetrics.blink * 0.5, 0.3);
     
-    return clamp(Math.round(runtimeState.smoothedAttention), 20, 99);
+    // Combined attention: weighted formula
+    // 60% gaze, 30% head, 10% blink
+    const distraction = clamp(gazeAway * 0.6 + headAway * 0.3 + blinkPenalty * 0.1, 0, 1);
+    const attentionRaw = 100 * (1 - distraction);
+    
+    // Apply EMA smoothing with slower response
+    runtimeState.smoothedAttention = applyEMA(attentionRaw, runtimeState.smoothedAttention, 0.18);
+    
+    return clamp(Math.round(runtimeState.smoothedAttention), 15, 99);
 }
 
 function estimateFatigue(
@@ -394,30 +419,33 @@ function estimateFatigue(
     }
 
     const earMin = Math.min(...runtimeState.earHistory);
-    // P4: Calibrated thresholds per code review
-    // Blink rate: 10-20 (normal), 20-30 (fatigue), >30 (high fatigue)
-    const normalizedBlinkRate = clamp(blinkRate / 30, 0, 1); // Changed from 28 to 30
-    const lowBlinkPenalty = blinkRate > 0 && blinkRate < 10 ? (10 - blinkRate) / 10 : 0; // Changed from 8 to 10
-    // EAR: >0.25 (open), 0.18-0.25 (normal), <0.18 (closed)
-    const prolongedClosure = clamp((0.25 - ear) / 0.07, 0, 1); // Changed from 0.2 to 0.25
-    const microSleepRisk = clamp((0.18 - earMin) / 0.05, 0, 1); // Changed from 0.17 to 0.18
+    const earAvg = average(runtimeState.earHistory) || ear;
+    
+    // Blink rate analysis: 8-18 normal, 18-25 elevated, >25 high fatigue
+    const normalizedBlinkRate = clamp((blinkRate - 8) / 22, 0, 1);
+    const lowBlinkPenalty = blinkRate > 0 && blinkRate < 8 ? (8 - blinkRate) / 8 * 0.6 : 0;
+    
+    // EAR thresholds: >0.26 (wide open), 0.20-0.26 (normal), <0.20 (drowsy)
+    const prolongedClosure = clamp((0.26 - earAvg) / 0.10, 0, 1);
+    const microSleepRisk = clamp((0.20 - earMin) / 0.08, 0, 1);
     const yawnBonus = isYawning ? 1 : 0;
 
     if (isYawning) {
         runtimeState.yawnCount++;
     }
 
-    // P4: Calibrated EAR threshold for closed eyes
-    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.18).length / Math.max(runtimeState.earHistory.length, 1); // Changed from 0.2 to 0.18
+    // Count frames with very low EAR (drowsiness indicator)
+    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.20).length / Math.max(runtimeState.earHistory.length, 1);
 
+    // Fatigue formula with adjusted weights for better sensitivity
     const fatigueScore = clamp(
-        earClosedPercent * 35 +
-        prolongedClosure * 22 +
-        normalizedBlinkRate * 18 +
-        lowBlinkPenalty * 12 +
-        microSleepRisk * 8 +
-        yawnBonus * 12 +
-        (emotion.label === 'Triste' ? emotion.score * 8 : 0),
+        earClosedPercent * 28 +
+        prolongedClosure * 24 +
+        normalizedBlinkRate * 22 +
+        lowBlinkPenalty * 10 +
+        microSleepRisk * 12 +
+        yawnBonus * 15 +
+        (emotion.label === 'Triste' ? emotion.score * 10 : 0),
         0,
         100
     );
@@ -489,7 +517,7 @@ function calculateDeceptionEstimate(): number {
         Math.pow(headPose.yaw, 2) + Math.pow(headPose.pitch, 2) + Math.pow(headPose.roll, 2)
     );
 
-    // Calculate emotion volatility: std of recent emotion scores
+    // Calculate emotion volatility: transition rate from recent labels
     const recentEmotions = runtimeState.emotionHistory.slice(-20);
     let emotionVolatility = 0;
     if (recentEmotions.length > 0) {
@@ -514,9 +542,18 @@ function calculateDeceptionEstimate(): number {
     // Calculate z-scores
     const zScores = runtimeState.signalProcessor.calculateZScores();
 
+    // Diagnostic logging
+    const baseline = runtimeState.signalProcessor.getBaseline();
+    const isUsingDefaultBaseline = runtimeState.signalProcessor.isUsingDefaultBaseline();
+    console.log('[Deception] Baseline mode:', isUsingDefaultBaseline ? 'DEFAULT' : 'CALIBRATED');
+    console.log('[Deception.Baseline]', baseline);
+    console.log('[Deception.Metrics] Attention:', attentionAvg, '| BlinkRate:', blinkRate, '| Fatigue:', fatigueAvg, '| HeadMotion:', headMotion, '| EmotionVolatility:', emotionVolatility);
+    console.log('[Deception.ZScores]', zScores);
+
     // Calculate deception probability (0-100)
     const deceptionProbability = calculateDeceptionProbability(zScores);
 
+    console.log('[Deception.Result] Probability:', deceptionProbability);
     return Math.round(deceptionProbability);
 }
 
@@ -595,8 +632,11 @@ async function analyzeFrame(frame: ImageData, video: HTMLVideoElement): Promise<
         );
         runtimeState.calibrationData.headMotion.push(headMotion);
 
-        // Emotion volatility: use emotion score standard deviation
-        runtimeState.calibrationData.emotionVolatility.push(stableEmotion.score);
+        // Emotion volatility: transition indicator between consecutive labels
+        const history = runtimeState.emotionHistory;
+        const lastIndex = history.length - 1;
+        const transition = lastIndex > 0 && history[lastIndex] !== history[lastIndex - 1] ? 1 : 0;
+        runtimeState.calibrationData.emotionVolatility.push(transition);
     }
 
     return runtimeState.currentAnalysis;
@@ -717,10 +757,12 @@ async function init(): Promise<void> {
                     fatigueStd: calculateStats(runtimeState.calibrationData.fatigue).std,
                     headMotionMean: calculateStats(runtimeState.calibrationData.headMotion).mean,
                     headMotionStd: calculateStats(runtimeState.calibrationData.headMotion).std,
-                    emotionVolatilityMean: calculateStats(runtimeState.calibrationData.emotionVolatility).mean
+                    emotionVolatilityMean: calculateStats(runtimeState.calibrationData.emotionVolatility).mean,
+                    emotionVolatilityStd: calculateStats(runtimeState.calibrationData.emotionVolatility).std
                 };
 
                 runtimeState.signalProcessor.setBaseline(baseline);
+                console.log('[Calibration] Baseline set:', baseline);
                 ui.status.textContent = '✓ Baseline calibrado';
                 ui.calibrateBtn.disabled = false;
             }, 5000);
@@ -758,6 +800,15 @@ async function startQuestionMode(ui: UIElements): Promise<void> {
     ui.questionBtn.disabled = true;
     ui.timer.style.display = 'block';
     let seconds = 7;
+
+    const isUsingDefaultBaseline = runtimeState.signalProcessor.isUsingDefaultBaseline();
+    if (isUsingDefaultBaseline) {
+        ui.status.textContent = '⚠️ Usando baseline estándar (sin calibrar) — responde ahora';
+        ui.status.style.color = '#ffc857';
+    } else {
+        ui.status.textContent = '✓ Baseline calibrado — responde ahora';
+        ui.status.style.color = '#00ff88';
+    }
 
     const interval = setInterval(() => {
         ui.timer.textContent = String(seconds);

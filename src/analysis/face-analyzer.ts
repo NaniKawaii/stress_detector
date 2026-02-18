@@ -194,28 +194,45 @@ function inferEmotion(blend: Record<string, number>): EmotionResult {
     const smile = (blend.mouthSmileLeft || 0) + (blend.mouthSmileRight || 0);
     const frown = (blend.mouthFrownLeft || 0) + (blend.mouthFrownRight || 0);
     const browInnerUp = blend.browInnerUp || 0;
+    const browDown = (blend.browDownLeft || 0) + (blend.browDownRight || 0);
     const jawOpen = blend.jawOpen || 0;
     const cheekSquint = (blend.cheekSquintLeft || 0) + (blend.cheekSquintRight || 0);
+    const eyeWide = (blend.eyeWideLeft || 0) + (blend.eyeWideRight || 0);
+    const noseSneer = (blend.noseSneerLeft || 0) + (blend.noseSneerRight || 0);
+    const mouthPucker = blend.mouthPucker || 0;
+    const upperLipRaise = (blend.mouthUpperUpLeft || 0) + (blend.mouthUpperUpRight || 0);
 
-    const happyScore = smile * 0.95 + cheekSquint * 0.35 - frown * 0.45;
-    const sadScore = frown * 0.9 + browInnerUp * 0.5 - smile * 0.35;
-    const surpriseScore = jawOpen * 0.9 + browInnerUp * 0.45;
+    // Calculate emotion scores with improved formulas
+    const happyScore = smile * 1.2 + cheekSquint * 0.4 - frown * 0.5;
+    const sadScore = frown * 1.0 + browInnerUp * 0.4 - smile * 0.4;
+    const surpriseScore = jawOpen * 0.9 + browInnerUp * 0.5 + eyeWide * 0.6;
+    const angryScore = browDown * 1.1 + noseSneer * 0.7 + frown * 0.3 - smile * 0.6;
+    const fearScore = eyeWide * 1.0 + browInnerUp * 0.6 + jawOpen * 0.3;
+    const disgustScore = noseSneer * 1.2 + upperLipRaise * 0.8 + browDown * 0.4;
 
-    let label: EmotionLabel = 'Neutral';
-    let score = 0.62;
+    // Find highest scoring emotion
+    const emotions = [
+        { label: 'Feliz' as EmotionLabel, score: happyScore },
+        { label: 'Triste' as EmotionLabel, score: sadScore },
+        { label: 'Sorprendido' as EmotionLabel, score: surpriseScore },
+        { label: 'Enojado' as EmotionLabel, score: angryScore },
+        { label: 'Asustado' as EmotionLabel, score: fearScore },
+        { label: 'Disgustado' as EmotionLabel, score: disgustScore }
+    ];
 
-    if (happyScore > sadScore && happyScore > surpriseScore && happyScore > 0.35) {
-        label = 'Feliz';
-        score = clamp(0.62 + happyScore * 0.32, 0.62, 0.97);
-    } else if (sadScore > happyScore && sadScore > surpriseScore && sadScore > 0.35) {
-        label = 'Triste';
-        score = clamp(0.6 + sadScore * 0.28, 0.6, 0.94);
-    } else if (surpriseScore > 0.45) {
-        label = 'Sorprendido';
-        score = clamp(0.6 + surpriseScore * 0.25, 0.6, 0.94);
+    emotions.sort((a, b) => b.score - a.score);
+    const best = emotions[0];
+    const second = emotions[1];
+
+    // Lower threshold for detection (was 0.35, now 0.22)
+    if (best.score > 0.22 && best.score > second.score + 0.08) {
+        return {
+            label: best.label,
+            score: clamp(0.55 + best.score * 0.35, 0.55, 0.95)
+        };
     }
 
-    return { label, score };
+    return { label: 'Neutral', score: 0.65 };
 }
 
 function inferAttention(eyeLook: number, blink: number, yaw: number, pitch: number): AttentionResult {

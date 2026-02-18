@@ -8,7 +8,22 @@ export interface BaselineMetrics {
     headMotionMean: number;
     headMotionStd: number;
     emotionVolatilityMean: number;
+    emotionVolatilityStd: number;
 }
+
+// Default baseline for when no calibration is performed
+const DEFAULT_BASELINE: BaselineMetrics = {
+    attentionMean: 75,
+    attentionStd: 12,
+    blinkRateMean: 15,
+    blinkRateStd: 4,
+    fatigueMean: 25,
+    fatigueStd: 8,
+    headMotionMean: 5,
+    headMotionStd: 2,
+    emotionVolatilityMean: 0.15,
+    emotionVolatilityStd: 0.08
+};
 
 export class SignalProcessor {
     private baseline: BaselineMetrics | null = null;
@@ -20,7 +35,10 @@ export class SignalProcessor {
         emotionVolatility: 0
     };
 
-    constructor() {}
+    constructor() {
+        // Use default baseline if none is set
+        console.log('[SignalProcessor] Initialized with default baseline');
+    }
 
     public setBaseline(baseline: BaselineMetrics): void {
         this.baseline = baseline;
@@ -43,21 +61,29 @@ export class SignalProcessor {
     }
 
     public calculateZScores(): Record<string, number> {
-        if (!this.baseline) {
-            return {};
-        }
+        // Use default baseline if none is set
+        const baseline = this.baseline || DEFAULT_BASELINE;
 
         const { attention, blinkRate, fatigue, headMotion, emotionVolatility } = this.currentSignals;
         const z: Record<string, number> = {};
 
         // Calculate z-scores: |value - mean| / std
-        z.attention = Math.abs(attention - this.baseline.attentionMean) / Math.max(this.baseline.attentionStd, 0.1);
-        z.blinkRate = Math.abs(blinkRate - this.baseline.blinkRateMean) / Math.max(this.baseline.blinkRateStd, 1);
-        z.fatigue = Math.abs(fatigue - this.baseline.fatigueMean) / Math.max(this.baseline.fatigueStd, 1);
-        z.headMotion = Math.abs(headMotion - this.baseline.headMotionMean) / Math.max(this.baseline.headMotionStd, 0.1);
-        z.emotionVolatility = emotionVolatility / Math.max(this.baseline.emotionVolatilityMean, 0.1);
+        z.attention = Math.abs(attention - baseline.attentionMean) / Math.max(baseline.attentionStd, 0.1);
+        z.blinkRate = Math.abs(blinkRate - baseline.blinkRateMean) / Math.max(baseline.blinkRateStd, 1);
+        z.fatigue = Math.abs(fatigue - baseline.fatigueMean) / Math.max(baseline.fatigueStd, 1);
+        z.headMotion = Math.abs(headMotion - baseline.headMotionMean) / Math.max(baseline.headMotionStd, 0.1);
+        z.emotionVolatility = Math.abs(emotionVolatility - baseline.emotionVolatilityMean) / Math.max(baseline.emotionVolatilityStd, 0.1);
 
+        console.debug('[Deception.SignalProcessor] Z-Scores calculated:', z);
         return z;
+    }
+
+    public getBaseline(): BaselineMetrics | null {
+        return this.baseline || DEFAULT_BASELINE;
+    }
+
+    public isUsingDefaultBaseline(): boolean {
+        return this.baseline === null;
     }
 
     public getSignals() {
