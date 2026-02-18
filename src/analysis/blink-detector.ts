@@ -9,8 +9,7 @@ interface BlinkFrame {
 
 class BlinkDetector {
     private frames: BlinkFrame[] = [];
-    private lastBlinkTime = 0;
-    private blinkCount = 0;
+    private blinkEvents: number[] = [];
     private windowSize = 60000;
 
     constructor() {}
@@ -26,21 +25,23 @@ class BlinkDetector {
         });
 
         this.frames = this.frames.filter((f) => now - f.timestamp < this.windowSize);
+        this.blinkEvents = this.blinkEvents.filter((timestamp) => now - timestamp < this.windowSize);
 
-        let blinksThisFrame = 0;
         if (this.frames.length >= 2) {
             const prev = this.frames[this.frames.length - 2];
             const curr = this.frames[this.frames.length - 1];
 
             if (prev.isEyeOpen && !curr.isEyeOpen) {
-                blinksThisFrame = 1;
-                this.blinkCount++;
-                this.lastBlinkTime = now;
+                this.blinkEvents.push(now);
             }
         }
 
-        const blinksPerMinute = this.frames.length > 0
-            ? Math.round((this.blinkCount / this.frames.length) * 600)
+        const elapsedWindowMs = this.frames.length > 1
+            ? Math.max(1000, this.frames[this.frames.length - 1].timestamp - this.frames[0].timestamp)
+            : 0;
+
+        const blinksPerMinute = elapsedWindowMs > 0
+            ? Math.round((this.blinkEvents.length / elapsedWindowMs) * 60000)
             : 0;
 
         return {
@@ -52,8 +53,7 @@ class BlinkDetector {
 
     reset(): void {
         this.frames = [];
-        this.blinkCount = 0;
-        this.lastBlinkTime = 0;
+        this.blinkEvents = [];
     }
 }
 

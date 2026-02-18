@@ -33,6 +33,20 @@ function softmax(values: number[]): number[] {
     return exps.map((value) => value / sum);
 }
 
+
+function normalizeProbabilities(values: number[]): number[] {
+    if (!values.length) return [];
+
+    const clean = values.map((value) => Number.isFinite(value) ? Math.max(0, value) : 0);
+    const sum = clean.reduce((acc, value) => acc + value, 0);
+
+    if (sum <= 0) {
+        return softmax(values);
+    }
+
+    return clean.map((value) => value / sum);
+}
+
 async function ensureModelLoaded(): Promise<void> {
     if (emotionModel || modelLoadFailed) {
         return;
@@ -106,7 +120,7 @@ async function detectFromModel(frame: ImageData): Promise<EmotionResult | null> 
     }
 
     const probabilities = data.every((value) => value >= 0 && value <= 1)
-        ? data
+        ? normalizeProbabilities(data)
         : softmax(data);
 
     if (!probabilities.length) {
@@ -123,9 +137,16 @@ async function detectFromModel(frame: ImageData): Promise<EmotionResult | null> 
         }
     }
 
+    const sorted = [...probabilities].sort((a, b) => b - a);
+    const margin = (sorted[0] || 0) - (sorted[1] || 0);
+
+    if (bestValue < 0.4 || margin < 0.08) {
+        return null;
+    }
+
     return {
         label: EMOTION_LABELS[bestIndex] ?? 'Neutral',
-        score: clamp(bestValue, 0.5, 0.99)
+        score: clamp(bestValue, 0.35, 0.95)
     };
 }
 
