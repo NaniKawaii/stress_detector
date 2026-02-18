@@ -389,17 +389,21 @@ function estimateFatigue(
     }
 
     const earMin = Math.min(...runtimeState.earHistory);
-    const normalizedBlinkRate = clamp(blinkRate / 28, 0, 1);
-    const lowBlinkPenalty = blinkRate > 0 && blinkRate < 8 ? (8 - blinkRate) / 8 : 0;
-    const prolongedClosure = clamp((0.2 - ear) / 0.07, 0, 1);
-    const microSleepRisk = clamp((0.17 - earMin) / 0.05, 0, 1);
+    // P4: Calibrated thresholds per code review
+    // Blink rate: 10-20 (normal), 20-30 (fatigue), >30 (high fatigue)
+    const normalizedBlinkRate = clamp(blinkRate / 30, 0, 1); // Changed from 28 to 30
+    const lowBlinkPenalty = blinkRate > 0 && blinkRate < 10 ? (10 - blinkRate) / 10 : 0; // Changed from 8 to 10
+    // EAR: >0.25 (open), 0.18-0.25 (normal), <0.18 (closed)
+    const prolongedClosure = clamp((0.25 - ear) / 0.07, 0, 1); // Changed from 0.2 to 0.25
+    const microSleepRisk = clamp((0.18 - earMin) / 0.05, 0, 1); // Changed from 0.17 to 0.18
     const yawnBonus = isYawning ? 1 : 0;
 
     if (isYawning) {
         runtimeState.yawnCount++;
     }
 
-    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.2).length / Math.max(runtimeState.earHistory.length, 1);
+    // P4: Calibrated EAR threshold for closed eyes
+    const earClosedPercent = runtimeState.earHistory.filter((e) => e < 0.18).length / Math.max(runtimeState.earHistory.length, 1); // Changed from 0.2 to 0.18
 
     const fatigueScore = clamp(
         earClosedPercent * 35 +
@@ -416,6 +420,7 @@ function estimateFatigue(
     // Apply EMA smoothing to fatigue score
     runtimeState.smoothedFatigue = applyEMA(fatigueScore, runtimeState.smoothedFatigue, 0.18);
 
+    // P4: Fatigue classification thresholds
     const level =
         runtimeState.smoothedFatigue >= 67 ? 'Alta' : runtimeState.smoothedFatigue >= 34 ? 'Media' : 'Baja';
 
